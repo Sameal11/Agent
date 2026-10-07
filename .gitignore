@@ -1,0 +1,16 @@
+.env
+mcp/.env
+mcp/audit.log
+mcp/.env.example
+
+venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+workspace/
+memory.json
+.mcp_approvals.json
+Untitled-1
+CHANGES.md
+pytest.ini
+test_agent.py

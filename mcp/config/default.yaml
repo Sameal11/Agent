@@ -1,0 +1,6 @@
+# General server behavior, independent of per-tool permissions.
+# Relative paths are resolved against the project root (the folder containing config/).
+workspace_root: "./workspace"      # created automatically; shell/read_file/write_file start here
+max_output_chars: 20000            # tool output is truncated to this many characters
+shell_timeout_seconds: 60          # default for the shell tool when the caller gives none
+audit_log: "./audit.log"

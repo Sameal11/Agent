@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+audit.log
+.pytest_cache/
+.ruff_cache/
+workspace/
+.mcp_approvals.json
+Untitled-1

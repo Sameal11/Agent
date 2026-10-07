@@ -1,0 +1,10 @@
+# Agent (agent.py) + MCP server (mcp/). Install the server itself with:  pip install -e mcp
+openai>=1.0
+mcp>=1.0.0,<2
+rich>=13
+prompt_toolkit>=3
+python-dotenv>=1.0
+pydantic>=2.6
+pyyaml>=6.0
+psutil>=5.9
+duckduckgo-search>=6.0

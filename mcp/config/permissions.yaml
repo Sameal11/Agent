@@ -1,0 +1,34 @@
+# Which tools are enabled, and whether each needs human confirmation before running
+# (on top of the hard-coded security.policy blocklist, which always applies).
+#
+# A tool runs only if BOTH its own entry and its "internal gate" entry (if any) are
+# enabled. Gates: write_file->filesystem, control_service->services,
+# install_package->packages, open_url->browser, take_screenshot->desktop.
+#
+# `confirm` semantics:
+#   * shell: decided per command by security/policy.py — read-only commands (ls, pwd,
+#     cat, ...) run without asking, everything else asks. The flag is not consulted.
+#   * every other tool that mutates state: true = ask each time.
+#   * read-only tools (system_info, read_file, list_*, search_*, network_info) never
+#     ask; their `confirm` value has no effect.
+tools:
+  system_info:        { enabled: true, confirm: false }
+  read_file:          { enabled: true, confirm: false }
+  write_file:         { enabled: true, confirm: true }
+  filesystem:         { enabled: true, confirm: true } # internal gate for write_file
+  shell:              { enabled: true, confirm: true }
+  list_processes:     { enabled: true, confirm: false }
+  kill_process:       { enabled: true, confirm: true }
+  control_service:    { enabled: true, confirm: true }
+  services:           { enabled: true, confirm: true } # internal gate for control_service
+  search_packages:    { enabled: true, confirm: false }
+  install_package:    { enabled: true, confirm: true }
+  packages:           { enabled: true, confirm: true } # internal gate for install_package
+  network_info:       { enabled: true, confirm: false }
+  list_applications:  { enabled: true, confirm: false }
+  open_url:           { enabled: true, confirm: true }
+  web_search:         { enabled: true, confirm: true }
+  browser:            { enabled: true, confirm: true } # internal gate for open_url
+  # Not implemented yet -> disabled so the model is not offered a tool that can only fail.
+  take_screenshot:    { enabled: false, confirm: true }
+  desktop:            { enabled: false, confirm: true } # internal gate for take_screenshot
