@@ -37,8 +37,8 @@ class CommandError(RuntimeError):
     pass
 
 
-def _tail(text: str) -> str:
-    limit = settings.max_output_chars
+def _tail(text: str, limit: int | None = None) -> str:
+    limit = limit or settings.max_output_chars
     return text if len(text) <= limit else "…[truncated]\n" + text[-limit:]
 
 
@@ -54,14 +54,16 @@ def _fail(argv: list[str], readonly: bool, message: str) -> CommandError:
     log_command(argv, exit_code=-1, readonly=readonly, note=message)
     return CommandError(message)
 
-def _read_tail(out) -> str:
+def _read_tail(out, limit: int | None = None) -> str:
+    limit = limit or settings.max_output_chars
     size = os.fstat(out.fileno()).st_size
-    out.seek(max(0, size - settings.max_output_chars * 4))
+    out.seek(max(0, size - limit * 4))
     return out.read().decode("utf-8", errors="replace")
 
 
 def _run(argv: list[str], cwd: str | None, timeout: int, readonly: bool,
-         detach_after: float | None = None) -> tuple[int | None, str, int]:
+         detach_after: float | None = None, env: dict | None = None,
+         max_output: int | None = None) -> tuple[int | None, str, int]:
     """Run argv, return (exit_code, combined stdout+stderr tail, pid).
 
     detach_after: if the process is still running after this many seconds, stop waiting and
@@ -73,7 +75,7 @@ def _run(argv: list[str], cwd: str | None, timeout: int, readonly: bool,
         try:
             proc = subprocess.Popen(
                 argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                start_new_session=True,
+                start_new_session=True, env=env,
             )
         except OSError as e:  # missing binary, bad cwd, permission denied...
             raise _fail(argv, readonly, f"cannot run {argv[0]!r}: {e}") from e
@@ -92,7 +94,7 @@ def _run(argv: list[str], cwd: str | None, timeout: int, readonly: bool,
                 if detach_after is not None and now - start >= detach_after:
                     log_command(argv, exit_code=0, readonly=readonly,
                                 note=f"still running after {detach_after:g}s; left running (pid {proc.pid})")
-                    return None, _tail(_read_tail(out)), proc.pid
+                    return None, _tail(_read_tail(out, max_output), max_output), proc.pid
                 if now >= deadline:
                     _kill_group(proc)
                     raise _fail(
@@ -101,17 +103,19 @@ def _run(argv: list[str], cwd: str | None, timeout: int, readonly: bool,
                         "server, launch it detached instead (e.g. `nohup cmd >/dev/null 2>&1 &`).",
                     ) from None
 
-        text = _read_tail(out)
+        text = _read_tail(out, max_output)
 
     log_command(argv, exit_code=proc.returncode, readonly=readonly)
-    return proc.returncode, _tail(text), proc.pid
+    return proc.returncode, _tail(text, max_output), proc.pid
 
 
 def run_readonly(argv: list[str], cwd: str | None = None, timeout: int = 30,
-                 allow_nonzero: bool = False) -> str:
+                 allow_nonzero: bool = False, env: dict | None = None,
+                 max_output: int | None = None) -> str:
     """Run a command that only reads system state (no confirmation needed,
-    but still audited). Raises CommandError on failure unless allow_nonzero."""
-    rc, text, _ = _run(argv, cwd, timeout, readonly=True)
+    but still audited). Raises CommandError on failure unless allow_nonzero.
+    max_output overrides the default output cap (for large read-only dumps)."""
+    rc, text, _ = _run(argv, cwd, timeout, readonly=True, env=env, max_output=max_output)
     if rc != 0 and not allow_nonzero:
         raise CommandError(f"{' '.join(argv)} failed (exit {rc}): {text.strip()}")
     return text

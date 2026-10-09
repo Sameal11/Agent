@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 from linux_mcp.validation import (
     HTTP_URL_PATTERN,
     PACKAGE_NAME_PATTERN,
+    PROGRAM_NAME_PATTERN,
+    SKILL_NAME_PATTERN,
     SEARCH_QUERY_PATTERN,
     UNIT_NAME_PATTERN,
 )
@@ -85,6 +87,71 @@ class ServiceControlArgs(BaseModel):
 class WebSearchArgs(BaseModel):
     query: str = Field(..., min_length=2, max_length=200, description="What to search for")
     max_results: int = Field(5, ge=1, le=10)
+# ---- weather ----
+class WeatherArgs(BaseModel):
+    location: str = Field(..., min_length=2, max_length=100,
+                          description="City name, optionally with region/country: 'Chennai' or 'Chennai, India'")
+    days: int = Field(3, ge=1, le=7, description="Days of forecast, starting today")
+
+
+# ---- tool knowledge base ----
+class FindToolArgs(BaseModel):
+    task: str = Field(..., min_length=2, max_length=200,
+                      description="What you need a tool to do, in plain words (e.g. 'scan open ports')")
+    limit: int = Field(6, ge=1, le=15)
+
+
+# ---- ClawHub skills ----
+class ClawHubSearchArgs(BaseModel):
+    query: str = Field(..., min_length=2, max_length=200, description="What the skill should do")
+    limit: int = Field(8, ge=1, le=20)
+
+
+class ClawHubRefArgs(BaseModel):
+    ref: str = Field(..., max_length=130, description="owner/slug exactly as clawhub_search returned it")
+
+
+class ClawHubInstallArgs(ClawHubRefArgs):
+    version: Optional[str] = Field(None, max_length=64,
+                                   description="Exact version from clawhub_inspect (pins what was checked)")
+
+
+class SkillNameArgs(BaseModel):
+    name: str = Field(..., pattern=SKILL_NAME_PATTERN, description="Installed skill name (its folder)")
+
+
+class UseSkillArgs(SkillNameArgs):
+    file: Optional[str] = Field(None, max_length=200,
+                                description="A supporting file inside the skill folder, instead of SKILL.md")
+
+
 # ---- browser ----
 class OpenUrlArgs(BaseModel):
     url: str = Field(..., max_length=2048, pattern=HTTP_URL_PATTERN, description="http(s) URL to open")
+
+
+# ---- research (verify before acting) ----
+class VerifyCommandArgs(BaseModel):
+    command: str = Field(..., max_length=4000, description="The exact bash command you intend to run")
+
+
+class ToolDocsArgs(BaseModel):
+    program: str = Field(..., pattern=PROGRAM_NAME_PATTERN, description="Installed program, e.g. nmap")
+    query: Optional[str] = Field(
+        None, max_length=100,
+        description="Only return documentation lines containing this text (e.g. an option like -sV)",
+    )
+    max_chars: int = Field(6000, ge=500, le=20_000)
+
+
+class CheckUrlArgs(BaseModel):
+    url: str = Field(..., max_length=2048, pattern=HTTP_URL_PATTERN, description="http(s) URL to check")
+
+
+class FetchPageArgs(BaseModel):
+    url: str = Field(..., max_length=2048, pattern=HTTP_URL_PATTERN, description="http(s) URL to read")
+    find: Optional[str] = Field(
+        None, max_length=100, description="Only return passages containing this text (case-insensitive)"
+    )
+    include_links: bool = Field(False, description="Also return the links found on the page")
+    max_chars: int = Field(6000, ge=500, le=20_000)

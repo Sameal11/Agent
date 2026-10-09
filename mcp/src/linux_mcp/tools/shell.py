@@ -7,15 +7,12 @@ reach. Protection comes from the policy blocklist and human approval, not from t
 """
 from __future__ import annotations
 
-import os
-
 from linux_mcp.config import settings
 from linux_mcp.schemas import ShellArgs, ToolResult
 from linux_mcp.security import policy
 from linux_mcp.security.pipeline import guarded_execute
 from linux_mcp.tools import applications
-
-WORKSPACE_ROOT = str(settings.workspace_root)
+from linux_mcp.utils import workspace
 
 # A command that starts a GUI app is given this long to finish; if it is still running it is
 # left running (not killed) and reported as started.
@@ -23,11 +20,13 @@ GUI_GRACE_SECONDS = 3
 
 
 def _resolve_cwd(cwd: str | None) -> str:
-    os.makedirs(WORKSPACE_ROOT, exist_ok=True)
-    target = os.path.abspath(os.path.join(WORKSPACE_ROOT, cwd)) if cwd else WORKSPACE_ROOT
-    if not os.path.isdir(target):
-        raise ValueError(f"cwd is not a directory: {target}")
-    return target
+    """The shell always starts inside the workspace and cannot be pointed outside it. The
+    command may still read system paths; this only fixes where it runs from."""
+    root = workspace.workspace_root()
+    target = workspace.resolve_within(cwd) if cwd else root   # raises on an escaping cwd
+    if not target.is_dir():
+        raise ValueError(f"cwd is not a directory inside the workspace: {target}")
+    return str(target)
 
 
 def run_shell(args: ShellArgs) -> ToolResult:

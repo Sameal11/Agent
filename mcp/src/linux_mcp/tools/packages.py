@@ -29,8 +29,16 @@ def install_package(args: PackageInstallArgs) -> ToolResult:
         return ToolResult(ok=False, error="No supported package manager found")
     try:  # the schema already checks the name; the adapter re-checks (defence in depth)
         argv = _adapter.install_command(args.package)
+        # Checked before the approval prompt: a guessed name (e.g. Debian's "python3-pip"
+        # on Arch, where it is "python-pip") should not cost the user a y/N decision.
+        if not _adapter.exists(args.package):
+            return ToolResult(ok=False, error=(
+                f"No package named '{args.package}' in the {_adapter.name} repositories. "
+                "Call search_packages to find the exact name; do not guess."))
     except ValueError as e:
         return ToolResult(ok=False, error=str(e))
+    except Exception as e:  # CommandError, timeouts
+        return ToolResult(ok=False, error=f"Could not check the package database: {e}")
     return guarded_execute(
         tool_name="packages",
         argv=argv,

@@ -1,6 +1,15 @@
 # General server behavior, independent of per-tool permissions.
 # Relative paths are resolved against the project root (the folder containing config/).
-workspace_root: "./workspace"      # created automatically; shell/read_file/write_file start here
+workspace_root: "~/agent_workspace"   # the ONE dir the agent writes in and works from (created automatically)
 max_output_chars: 20000            # tool output is truncated to this many characters
 shell_timeout_seconds: 60          # default for the shell tool when the caller gives none
 audit_log: "./audit.log"
+
+clawhub:
+  # Skills install into <workdir>/skills/<slug>, tracked in <workdir>/.clawhub/lock.json - the
+  # same layout as the `clawhub` CLI and OpenClaw. Relative paths are resolved against this
+  # mcp/ folder; default (unset) is the project root. CLAWHUB_WORKDIR overrides it.
+  # workdir: ".."
+  # Install skills whose ClawHub security verdict is not clean (e.g. "suspicious").
+  # Only you can turn this on; the model cannot. Leave false unless you have read the skill.
+  allow_unverified: false

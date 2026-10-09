@@ -137,10 +137,10 @@ def _violation(name: str, args: list[str]) -> str | None:
             return f"recursive {name} of a system directory"
     return None
 
-def programs(command: str) -> list[str]:
-    """Basename of the program each simple command in `command` would run, looking through
-    VAR=x prefixes, wrappers (nohup, setsid, env, sudo...) and `sh -c '...'` payloads."""
-    names: list[str] = []
+def invocations(command: str) -> list[tuple[str, list[str]]]:
+    """(program as written, its arguments) for each simple command in `command`, looking
+    through VAR=x prefixes, wrappers (nohup, setsid, env, sudo...) and `sh -c '...'` payloads."""
+    found: list[tuple[str, list[str]]] = []
     for seg in _segments(command):
         i, wrapped = 0, False
         while i < len(seg):
@@ -152,10 +152,57 @@ def programs(command: str) -> list[str]:
             elif wrapped and tok.startswith("-"):
                 pass
             else:
-                names.append(os.path.basename(tok))
+                found.append((tok, seg[i + 1:]))
                 break
             i += 1
-    return names
+    return found
+
+
+_ELEVATORS = {"sudo", "doas"}
+# sudo/doas options that read a password from somewhere other than the terminal. With them
+# a password ends up in the command line (`echo pw | sudo -S ...`), and so in the model's
+# context, the history and the audit log.
+_PASSWORD_INPUT_FLAGS = re.compile(r"^(-[A-Za-z]*[SA][A-Za-z]*|--stdin|--askpass)$")
+_VALUE_OPTS = {"-u", "-g", "-p", "-C", "-D", "-r", "-t", "-T", "-U"}  # sudo options taking a value
+
+
+def elevates(command: str) -> bool:
+    """True if any simple command in `command` runs through sudo/doas."""
+    for seg in _segments(command):
+        for tok in seg:
+            if re.match(r"^\w+=", tok):
+                continue
+            if os.path.basename(tok) in _ELEVATORS:
+                return True
+            if os.path.basename(tok) not in _WRAPPERS:
+                break
+    return False
+
+
+def check_elevation(command: str) -> None:
+    """Raise PolicyViolation if sudo/doas would take its password from anywhere but the
+    terminal prompt."""
+    for seg in _segments(command):
+        for i, tok in enumerate(seg):
+            if os.path.basename(tok) in _ELEVATORS:
+                rest = iter(seg[i + 1:])
+                for opt in rest:
+                    if not opt.startswith("-") or opt == "--":
+                        break
+                    if opt in _VALUE_OPTS:      # `-u root`: skip the value, keep scanning
+                        next(rest, None)
+                        continue
+                    if _PASSWORD_INPUT_FLAGS.match(opt):
+                        raise PolicyViolation(
+                            f"Blocked: '{tok} {opt}' passes a password outside the terminal prompt. "
+                            "Run plain `sudo <command>`; the user types the password into sudo itself.")
+    if re.search(r"\bSUDO_ASKPASS=", command):
+        raise PolicyViolation("Blocked: SUDO_ASKPASS is not allowed; use plain `sudo <command>`.")
+
+
+def programs(command: str) -> list[str]:
+    """Basename of the program each simple command in `command` would run."""
+    return [os.path.basename(prog) for prog, _ in invocations(command)]
 
 def check(command: str) -> None:
     """Raises PolicyViolation if the command matches a hard-blocked pattern."""

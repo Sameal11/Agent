@@ -95,6 +95,53 @@ in `config/permissions.yaml` so the model is not offered a tool that can only fa
   that `agent.py` imports.
 * Tests: run `pytest` from the project root (agent + server) or from `mcp/`.
 
+## Research-first tools
+
+`find_tool` answers "which installed tool does X?" without exposing every binary as its own
+MCP tool (which would overflow a small model's context). It ranks the installed packages'
+names and descriptions - read from the package database in one query (`tools/find_tool.py`,
+a pure-Python BM25 index, no GPU or network) - plus a small curated map of common
+security/ops intents (`port scan` -> nmap, `crack password hashes` -> hashcat/john, ...).
+For a tool that is not installed, `search_packages` searches the repositories.
+
+
+So a small model does not run commands from a misremembered syntax (it used `nmap -sP`,
+which this nmap renamed to `-sn`), three read-only tools check the real machine first:
+
+* `environment_info` - OS, distro family, package manager, desktop, browsers, installed tools.
+* `verify_command` - for each program in a command: installed? which package owns it (or, if
+  missing, would provide it)? is each flag in the installed version's `--help`?
+* `tool_docs` - a program's own tldr/man/`--help`, filtered to a query (e.g. one option).
+
+The agent (`agent.py`) runs `verify_command` automatically before every `shell` command. If a
+program is missing or a flag is undocumented, it returns the findings instead of running and
+the model fixes the command (via `tool_docs` or by installing the tool). Re-submitting the
+same command runs it, so a flag the tool still accepts (an old alias) is not blocked forever.
+Reading a program's help runs it with `--help`, so it is done only for package-managed
+binaries in system directories - never GUI apps, workspace scripts, or power/disk commands.
+
+## ClawHub skills
+
+`clawhub/` + `tools/clawhub.py` let the agent find and install skills from ClawHub
+(clawhub.ai, OpenClaw's registry): `clawhub_search` -> `clawhub_inspect` -> `clawhub_install`
+-> `use_skill`. A skill is a `SKILL.md` of instructions the model follows with its existing
+tools, not new executable tools; everything a skill asks to run still goes through approval.
+
+Install gate (`clawhub/gate.py`), any failure refuses the install:
+* ClawHub's own `/verify` must pass (clean ClawScan verdict). The search API's
+  `nonSuspiciousOnly` filter does not exclude "suspicious" skills, so it is not used as a gate.
+  Only `clawhub.allow_unverified: true` in `config/default.yaml` relaxes this.
+* Bundle checks (`clawhub/bundle.py`): no path traversal, symlinks, encrypted entries, oversize.
+* Local scan (`clawhub/scanner.py`): pipe-to-shell installers, decode-and-run, password-protected
+  payloads, bundled executables, credential-store reads, instructions to deceive the user.
+* Skills are always addressed as `owner/slug` (slugs are shared by different publishers).
+* The agent shows the inspection report (publisher, verdict, warnings) in the approval prompt
+  and pins the inspected version, so a newer upload cannot replace what was reviewed.
+
+Skills install into `<workdir>/skills/<slug>` with `.clawhub/origin.json` and
+`<workdir>/.clawhub/lock.json` in OpenClaw's format, so the `clawhub` CLI sees them. The workdir
+defaults to the project root (`CLAWHUB_WORKDIR` or `clawhub.workdir` override it).
+
 ## Setup
 
 ```bash

@@ -1,5 +1,6 @@
 # Agent (agent.py) + MCP server (mcp/). Install the server itself with:  pip install -e mcp
 openai>=1.0
+anthropic>=1.12   # only needed with LLM_PROVIDER=anthropic
 mcp>=1.0.0,<2
 rich>=13
 prompt_toolkit>=3

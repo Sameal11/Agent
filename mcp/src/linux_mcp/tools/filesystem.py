@@ -7,25 +7,15 @@ from __future__ import annotations
 
 import os
 
-from linux_mcp.config import settings
 from linux_mcp.schemas import ReadFileArgs, ToolResult, WriteFileArgs
 from linux_mcp.security.pipeline import guarded_call
-
-WORKSPACE_ROOT = str(settings.workspace_root)
+from linux_mcp.utils import workspace
 
 
 def _safe_path(path: str) -> str:
-    """Resolve `path` inside the workspace or raise.
-
-    Two bugs fixed here: (1) the old `startswith(root)` check let `../workspace-evil/x`
-    through because "/a/workspace-evil" starts with "/a/workspace"; (2) symlinks inside
-    the workspace pointing elsewhere were not resolved. realpath + commonpath fixes both.
-    """
-    root = os.path.realpath(WORKSPACE_ROOT)
-    p = os.path.realpath(os.path.join(root, path))
-    if os.path.commonpath([root, p]) != root:
-        raise ValueError("Path escapes the sandboxed workspace")
-    return p
+    """Resolve `path` inside the workspace or raise (realpath + commonpath; see
+    utils/workspace.py). Shared with shell so there is one jail, not two."""
+    return str(workspace.resolve_within(path))
 
 
 def read_file(args: ReadFileArgs) -> ToolResult:
@@ -37,6 +27,11 @@ def read_file(args: ReadFileArgs) -> ToolResult:
 
 
 def write_file(args: WriteFileArgs) -> ToolResult:
+    try:                      # reject an escaping path before anyone is asked to approve it
+        _safe_path(args.path)
+    except ValueError as e:
+        return ToolResult(ok=False, error=str(e))
+
     def do_write():
         p = _safe_path(args.path)
         os.makedirs(os.path.dirname(p), exist_ok=True)

@@ -13,6 +13,11 @@
 #     ask; their `confirm` value has no effect.
 tools:
   system_info:        { enabled: true, confirm: false }
+  environment_info:   { enabled: true, confirm: false }
+  verify_command:     { enabled: true, confirm: false }
+  tool_docs:          { enabled: true, confirm: false }
+  find_tool:          { enabled: true, confirm: false }
+  ensure_python_env:  { enabled: true, confirm: false }
   read_file:          { enabled: true, confirm: false }
   write_file:         { enabled: true, confirm: true }
   filesystem:         { enabled: true, confirm: true } # internal gate for write_file
@@ -28,6 +33,15 @@ tools:
   list_applications:  { enabled: true, confirm: false }
   open_url:           { enabled: true, confirm: true }
   web_search:         { enabled: true, confirm: true }
+  fetch_page:         { enabled: true, confirm: false }
+  get_weather:        { enabled: true, confirm: false }
+  # ClawHub skills. Install/remove always ask (force_confirm), whatever `confirm` says.
+  clawhub_search:     { enabled: true, confirm: false }
+  clawhub_inspect:    { enabled: true, confirm: false }
+  clawhub_install:    { enabled: true, confirm: true }
+  list_skills:        { enabled: true, confirm: false }
+  use_skill:          { enabled: true, confirm: false }
+  remove_skill:       { enabled: true, confirm: true }
   browser:            { enabled: true, confirm: true } # internal gate for open_url
   # Not implemented yet -> disabled so the model is not offered a tool that can only fail.
   take_screenshot:    { enabled: false, confirm: true }

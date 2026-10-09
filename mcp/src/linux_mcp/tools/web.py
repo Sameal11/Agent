@@ -1,156 +1,304 @@
-"""Web search that returns TEXT (titles + links), so the model can find a URL itself."""
+"""Web search that returns TEXT (title, URL, snippet), so the model can find a URL itself.
+
+Providers are tried in order until one returns results:
+  1. DuckDuckGo Lite (GET). The html.duckduckgo.com endpoint now answers every request,
+     GET or POST, browser-like headers or not, with a 202 bot-check page ("anomaly"),
+     which the old parser reported as "No results".
+  2. Bing, as a fallback when DuckDuckGo is blocked or empty.
+A provider that serves a bot-check page is reported as blocked, not as "no results", so the
+model does not conclude the thing it searched for does not exist.
+"""
 from __future__ import annotations
 
+import base64
 import urllib.parse
-import urllib.request
 from html.parser import HTMLParser
 
-from linux_mcp.schemas import ToolResult, WebSearchArgs
+from linux_mcp.schemas import FetchPageArgs, ToolResult, WebSearchArgs
+from linux_mcp.utils import http
 
-# Fixed: Removed "?q=" so the POST request handles the query payload correctly
-SEARCH_URL = "https://html.duckduckgo.com/html/"
-_MAX_BYTES = 600_000
-_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) linux-mcp", "Accept-Language": "en"}
+# DDG Lite serves results to a plain client but a bot-check to a fake Chrome User-Agent.
+_DDG_HEADERS = {"User-Agent": "linux-mcp/0.1 (+local agent)"}
+_BING_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}
+_MAX_BYTES = 800_000
 
 
-class _Anchors(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.results: list[dict] = []
-        self.current_result: dict | None = None
-        
-        # Tracking states
-        self.in_result = False
-        self.in_title_link = False
-        self.title_text: list[str] = []
-        self.div_depth = 0  # Added to track nested div tags
+class SearchBlocked(Exception):
+    pass
 
-    def handle_starttag(self, tag, attrs):
-        attrs_dict = dict(attrs)
-        class_name = attrs_dict.get("class", "")
 
-        # 1. Detect the start of a result block
-        if tag == "div" and "result" in class_name.split():
-            self.in_result = True
-            self.current_result = {"title": "", "url": ""}
-            self.div_depth = 1  # Reset depth for new result block
-            
-        # Track nested divs to avoid premature closing
-        elif self.in_result and tag == "div":
-            self.div_depth += 1
+def _text(parts: list[str], limit: int) -> str:
+    return " ".join("".join(parts).split())[:limit]
 
-        # 2. Inside a result, find the main result link (Fixed: result__url -> result__a)
-        elif self.in_result and tag == "a" and "result__a" in class_name.split():
-            href = attrs_dict.get("href", "")
-            url = _real_url(href)
-            if url and self.current_result:
-                self.current_result["url"] = url
-                self.in_title_link = True
-                self.title_text = []
-
-    def handle_data(self, data):
-        # Collect text fragments inside the title link
-        if self.in_title_link:
-            self.title_text.append(data)
-
-    def handle_endtag(self, tag):
-        # Close out the title link text collection
-        if tag == "a" and self.in_title_link:
-            if self.current_result:
-                clean_title = " ".join("".join(self.title_text).split())
-                self.current_result["title"] = clean_title[:120]
-            self.in_title_link = False
-
-        # Close out the whole result block only when the outermost parent div closes
-        elif tag == "div" and self.in_result:
-            self.div_depth -= 1
-            if self.div_depth == 0:
-                if self.current_result and self.current_result["url"] and self.current_result["title"]:
-                    self.results.append(self.current_result)
-                self.current_result = None
-                self.in_result = False
-   
 
 def _real_url(href: str) -> str | None:
-    if "y.js" in href:  # ads
-        return None
+    """Unwrap DuckDuckGo (/l/?uddg=) and Bing (/ck/a?...&u=a1<base64>) redirect links."""
     if href.startswith("//"):
         href = "https:" + href
-    query = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
-    if "uddg" in query:  # DuckDuckGo wraps the real link
-        href = query["uddg"][0]
     parts = urllib.parse.urlparse(href)
-    if parts.scheme not in ("http", "https") or not parts.netloc or parts.netloc.endswith("duckduckgo.com"):
+    query = urllib.parse.parse_qs(parts.query)
+    if "uddg" in query:
+        href = query["uddg"][0]
+    elif parts.netloc.endswith("bing.com") and parts.path.startswith("/ck/") and "u" in query:
+        encoded = query["u"][0]
+        if not encoded.startswith("a1"):
+            return None
+        encoded = encoded[2:]
+        try:
+            href = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
+    parts = urllib.parse.urlparse(href)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return None
+    if parts.netloc.endswith(("duckduckgo.com", "bing.com")) or "y.js" in href:  # ads/internal
         return None
     return href
 
 
-def parse_results(page: str, limit: int) -> list[dict]:
-    parser = _Anchors()
-    parser.feed(page)  # Fixed: Removed the duplicate parser.feed(page) call
-    
-    # De-duplicate clean entries up to the limit
-    seen = set()
-    deduped_results = []
-    
-    for item in parser.results:
-        if item["url"] not in seen:
-            seen.add(item["url"])
-            deduped_results.append(item)
-            if len(deduped_results) >= limit:
+class _DdgLite(HTMLParser):
+    """<a class='result-link' href=...>title</a> ... <td class='result-snippet'>text</td>"""
+
+    def __init__(self):
+        super().__init__()
+        self.results: list[dict] = []
+        self._field: str | None = None
+        self._buf: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        classes = (a.get("class") or "").split()
+        if tag == "a" and "result-link" in classes:
+            url = _real_url(a.get("href", ""))
+            self.results.append({"title": "", "url": url, "snippet": ""})
+            self._field, self._buf = "title", []
+        elif tag == "td" and "result-snippet" in classes and self.results:
+            self._field, self._buf = "snippet", []
+
+    def handle_data(self, data):
+        if self._field:
+            self._buf.append(data)
+
+    def handle_endtag(self, tag):
+        if (self._field == "title" and tag == "a") or (self._field == "snippet" and tag == "td"):
+            self.results[-1][self._field] = _text(self._buf, 120 if self._field == "title" else 300)
+            self._field = None
+
+
+class _Bing(HTMLParser):
+    """<li class="b_algo"> <h2><a href=...>title</a></h2> ... <p>snippet</p> </li>"""
+
+    def __init__(self):
+        super().__init__()
+        self.results: list[dict] = []
+        self._depth = 0          # <li> nesting inside the current b_algo
+        self._in_h2 = False
+        self._field: str | None = None
+        self._buf: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "li":
+            if self._depth:
+                self._depth += 1
+            elif "b_algo" in (a.get("class") or "").split():
+                self._depth = 1
+                self.results.append({"title": "", "url": None, "snippet": ""})
+            return
+        if not self._depth:
+            return
+        cur = self.results[-1]
+        if tag == "h2":
+            self._in_h2 = True
+        elif tag == "a" and self._in_h2 and cur["url"] is None:
+            cur["url"] = _real_url(a.get("href", ""))
+            self._field, self._buf = "title", []
+        elif tag == "p" and not cur["snippet"] and self._field is None:
+            self._field, self._buf = "snippet", []
+
+    def handle_data(self, data):
+        if self._field:
+            self._buf.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "li" and self._depth:
+            self._depth -= 1
+        elif tag == "h2":
+            self._in_h2 = False
+        if (self._field == "title" and tag == "a") or (self._field == "snippet" and tag == "p"):
+            self.results[-1][self._field] = _text(self._buf, 120 if self._field == "title" else 300)
+            self._field = None
+
+
+def _dedupe(results: list[dict], limit: int) -> list[dict]:
+    seen, out = set(), []
+    for r in results:
+        if r["url"] and r["title"] and r["url"] not in seen:
+            seen.add(r["url"])
+            out.append(r)
+            if len(out) >= limit:
                 break
-    return deduped_results
+    return out
 
 
-def _fetch(query: str) -> str:
-    # 1. Prepare form data payload for a standard POST request
-    data_dict = {"q": query}
-    encoded_data = urllib.parse.urlencode(data_dict).encode("utf-8")
-    
-    # 2. Emulate an official web browser environment to pass WAF verification
-    browser_headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Origin": "https://html.duckduckgo.com",
-        "Referer": "https://html.duckduckgo.com/"
-    }
-    
-    # 3. Requesting the base endpoint via POST bypasses the blocking checks
-    req = urllib.request.Request(
-        SEARCH_URL, 
-        data=encoded_data, 
-        headers=browser_headers, 
-        method="POST"
-    )
-    
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return resp.read(_MAX_BYTES).decode("utf-8", errors="replace")
+def parse_ddg_lite(page: str, limit: int) -> list[dict]:
+    parser = _DdgLite()
+    parser.feed(page)
+    return _dedupe(parser.results, limit)
+
+
+def parse_bing(page: str, limit: int) -> list[dict]:
+    parser = _Bing()
+    parser.feed(page)
+    return _dedupe(parser.results, limit)
+
+
+def _get(url: str, headers: dict) -> str:
+    resp = http.request(url, headers=headers, max_bytes=_MAX_BYTES)
+    page = resp.text()
+    # DDG answers a bot-check with 202 + "anomaly"; Bing with a captcha page.
+    if resp.status == 202 or resp.status >= 400 or "anomaly-modal" in page or "/captcha/" in page:
+        raise SearchBlocked(f"HTTP {resp.status}")
+    return page
+
+
+def _search_ddg(query: str, limit: int) -> list[dict]:
+    q = urllib.parse.urlencode({"q": query})
+    return parse_ddg_lite(_get(f"https://lite.duckduckgo.com/lite/?{q}", _DDG_HEADERS), limit)
+
+
+def _search_bing(query: str, limit: int) -> list[dict]:
+    q = urllib.parse.urlencode({"q": query})
+    return parse_bing(_get(f"https://www.bing.com/search?{q}", _BING_HEADERS), limit)
+
+
+PROVIDERS = [("duckduckgo", _search_ddg), ("bing", _search_bing)]
 
 
 def web_search(args: WebSearchArgs) -> ToolResult:
-    try:
-        page = _fetch(args.query)
-    except OSError as e:  # URLError, HTTPError, timeouts
-        return ToolResult(ok=False, error=(
-            f"Web search failed ({e}). As a fallback call open_url with "
-            "https://www.google.com/search?q=<url-encoded terms> so the user can look."))
-    results = parse_results(page, args.max_results)
-    if not results:
-        return ToolResult(ok=False, error=(
-            "No results (the search provider may have blocked this request). Try different "
-            "words, or open a Google search page with open_url."))
-    return ToolResult(ok=True, data=results)
+    problems = []
+    for name, search in PROVIDERS:
+        try:
+            results = search(args.query, args.max_results)
+        except SearchBlocked as e:
+            problems.append(f"{name}: blocked the request ({e})")
+            continue
+        except (http.FetchError, OSError) as e:
+            problems.append(f"{name}: {e}")
+            continue
+        if results:
+            return ToolResult(ok=True, data={"provider": name, "results": results})
+        problems.append(f"{name}: no results")
+    if all(p.endswith("no results") for p in problems):
+        return ToolResult(ok=False, error="No results for this query. Try fewer or different words.")
+    return ToolResult(ok=False, error=(
+        "Web search is unavailable right now (" + "; ".join(problems) + "). This says nothing "
+        "about whether the page exists. Tell the user search failed; do not guess a URL."))
 
 
 TOOL_SPEC = {
     "name": "web_search",
-    "description": "Search the web; returns titles and URLs of the top results. Use it to FIND a "
-                   "website or page, then open it with open_url.",
+    "description": "Search the web; returns title, URL and snippet of the top results. Use it to FIND "
+                   "a website or page, then open it with open_url using a URL from the results.",
     "args_model": WebSearchArgs,
     "handler": web_search,
+}
+
+
+# ---- fetch_page: read a page's text (so the model can actually read the web) ----
+class _TextExtractor(HTMLParser):
+    """Turn HTML into readable plain text. Drops script/style/etc., inserts line breaks at
+    block tags, and records links. Stdlib only - no BeautifulSoup dependency."""
+    _SKIP = {"script", "style", "head", "noscript", "svg", "template", "iframe"}
+    _BLOCK = {"p", "br", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+              "section", "article", "header", "footer", "ul", "ol", "table", "pre", "blockquote"}
+
+    def __init__(self):
+        super().__init__()
+        self.parts: list[str] = []
+        self.links: list[tuple[str, str]] = []
+        self._skip = 0
+        self._href: str | None = None
+        self._linktext: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skip += 1
+        if tag in self._BLOCK:
+            self.parts.append("\n")
+        if tag == "a":
+            self._href = dict(attrs).get("href")
+            self._linktext = []
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._skip:
+            self._skip -= 1
+        if tag in self._BLOCK:
+            self.parts.append("\n")
+        if tag == "a" and self._href:
+            self.links.append((" ".join("".join(self._linktext).split()), self._href))
+            self._href = None
+
+    def handle_data(self, data):
+        if self._skip:
+            return
+        self.parts.append(data)
+        if self._href is not None:
+            self._linktext.append(data)
+
+    def text(self) -> str:
+        lines, blank = [], False
+        for ln in "".join(self.parts).splitlines():
+            ln = ln.strip()
+            if ln:
+                lines.append(ln)
+                blank = False
+            elif not blank:          # collapse runs of blank lines into one
+                lines.append("")
+                blank = True
+        return "\n".join(lines).strip()
+
+
+def fetch_page(args: FetchPageArgs) -> ToolResult:
+    try:
+        resp = http.request(args.url, max_bytes=2_000_000, timeout=12)
+    except http.FetchError as e:
+        return ToolResult(ok=False, error=f"Could not fetch {args.url} ({e.kind}): {e}")
+    if resp.status >= 400:
+        return ToolResult(ok=False, error=f"HTTP {resp.status} for {resp.url}")
+
+    ctype = resp.content_type
+    if ctype and "html" not in ctype and "xml" not in ctype:
+        if ctype.startswith("text/") or "json" in ctype:   # plain text / json: return as-is
+            return ToolResult(ok=True, data={"url": resp.url, "content_type": ctype,
+                                             "text": resp.text()[:args.max_chars]})
+        return ToolResult(ok=False, error=f"{resp.url} is {ctype}, not a readable web page.")
+
+    extractor = _TextExtractor()
+    extractor.feed(resp.text())
+    text = extractor.text()
+    if args.find:
+        q = args.find.lower()
+        hits = [ln for ln in text.split("\n") if q in ln.lower()]
+        text = "\n".join(hits) if hits else f"(no line matches '{args.find}'; showing the start)\n{text}"
+
+    data = {"url": resp.url, "text": text[:args.max_chars]}
+    if args.include_links:
+        seen, links = set(), []
+        for label, href in extractor.links:
+            absolute = urllib.parse.urljoin(resp.url, href)
+            if absolute.startswith(("http://", "https://")) and absolute not in seen:
+                seen.add(absolute)
+                links.append({"text": label[:80], "url": absolute})
+        data["links"] = links[:60]
+    return ToolResult(ok=True, data=data)
+
+
+FETCH_TOOL_SPEC = {
+    "name": "fetch_page",
+    "description": "Read a web page as plain text (optionally only lines matching `find`, and/or its "
+                   "links). Use this to READ a page's contents; use open_url only to open a page in the "
+                   "user's browser. Fetch a URL from web_search results or the user, not a guessed one.",
+    "args_model": FetchPageArgs,
+    "handler": fetch_page,
 }

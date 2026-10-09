@@ -43,3 +43,21 @@ class DnfAdapter(PackageAdapter):
     def is_installed(self, package: str) -> bool:
         # Was `package.split(".")[0] in out`: a substring test, so "vim" matched "vim-minimal".
         return run_check(["rpm", "-q", package])
+
+    def describe_installed(self) -> list[tuple[str, str]]:
+        out = run_readonly(["rpm", "-qa", "--qf", "%{NAME}\t%{SUMMARY}\n"],
+                           allow_nonzero=True, timeout=60, max_output=8_000_000)
+        return [(l.split("\t", 1)[0], l.split("\t", 1)[1].strip()) for l in out.splitlines() if "\t" in l]
+
+    def exists(self, package: str) -> bool:
+        return run_check(["dnf", "-q", "info", self.validate_package_name(package)])
+
+    def owner_of(self, path: str) -> str | None:
+        out = run_readonly(["rpm", "-qf", "--", path], allow_nonzero=True).strip()
+        return out if out and "not owned" not in out and "No such file" not in out else None
+
+    def providers_of(self, command: str) -> list[str] | None:
+        out = run_readonly(["dnf", "-q", "provides", f"*/bin/{command}"], allow_nonzero=True)
+        # "nmap-3:7.92-1.fc39.x86_64 : Network exploration tool"
+        return sorted({line.split(" : ", 1)[0].rsplit("-", 2)[0] for line in out.splitlines()
+                       if " : " in line and not line.startswith(" ")})

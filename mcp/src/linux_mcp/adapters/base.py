@@ -56,3 +56,25 @@ class PackageAdapter(ABC):
     @abstractmethod
     def is_installed(self, package: str) -> bool:
         ...
+
+    # ---- verification helpers (research-first). Each answers from the package
+    # database, never from a guess; None means "this manager cannot tell". ----
+
+    @abstractmethod
+    def exists(self, package: str) -> bool:
+        """True if `package` is an exact name available in the configured repositories."""
+
+    @abstractmethod
+    def owner_of(self, path: str) -> str | None:
+        """'name version' of the installed package that owns file `path`, if known."""
+
+    def providers_of(self, command: str) -> list[str] | None:
+        """Packages that would install an executable named `command`. None if the
+        manager has no file database available (e.g. `pacman -Fy` never run)."""
+        return None
+
+    def describe_installed(self) -> list[tuple[str, str]]:
+        """(package name, one-line description) for every installed package, in a constant
+        number of subprocesses. Used to build the local tool-knowledge index (find_tool).
+        Default empty so managers that do not implement it simply contribute nothing."""
+        return []
